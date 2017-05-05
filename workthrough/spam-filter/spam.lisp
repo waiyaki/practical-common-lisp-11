@@ -12,10 +12,12 @@
 
 (defun classification (score)
   "Determine whether a message is either spam, ham or unsure based on it's score"
-  (cond
+  (values
+   (cond
     ((<= score *max-ham-score*) 'ham)
     ((>= score *min-spam-score*) 'spam)
-    (t 'unsure)))
+    (t 'unsure))
+   score))
 
 ;;; Extract the features of a message.
 ;;; For each message, extract the words appearing in it.
@@ -164,3 +166,145 @@
       for prob = (exp (- m)) then (* prob (/ m i))
       summing prob)
    1.0))
+
+
+;;;; Testing the filter
+(defun add-file-to-corpus (filename type corpus)
+  "Add a file to the corpus of messages of known types"
+  (vector-push-extend (list filename type) corpus))
+
+(defparameter *corpus* (make-array 1000 :adjustable t :fill-pointer 0)
+  "Vector with a fill pointer to hold corpus of messages")
+
+(defun add-directory-to-corpus (dir type corpus)
+  "Add all files in a directory in a folder as the same type"
+  ;; Using `list-directory` from `pathnames` (Chapter 15)
+  (dolist (filename (list-directory dir))
+    (add-file-to-corpus filename type corpus)))
+
+(defun test-classifier (corpus testing-fraction)
+  "Test the classifier by training it on a part of the corpus and having it classify the rest"
+  (clear-database)
+  (let* ((shuffled (shuffle-vector corpus))
+         (size (length corpus))
+         (train-on (floor (* size (- 1 testing-fraction)))))
+    (train-from-corpus shuffled :start 0 :end train-on)
+    (test-from-corpus shuffled :start train-on)))
+
+
+(defparameter *max-chars* (* 10 1024)
+  "Maximum number of characters to read from a message")
+
+(defun train-from-corpus (corpus &key (start 0) end)
+  "Loop over a subsequence of the corpus and use messages in it to train the classifier"
+  (loop for index from start below (or end (length corpus)) do
+       (destructuring-bind (file type) (aref corpus index)
+         (train (start-of-file file *max-chars*) type))))
+
+;;; Test the classifier with messages in a corpus
+;;; Return a list containing the classification, score and a list of
+;;; the filename, actual type, type returned by classifier and the score.
+;;; This information will be used to analyze the results after the fact.
+(defun test-from-corpus (corpus &key (start 0) end)
+  (loop for index from start below (or end (length corpus)) collect
+       (destructuring-bind (file type) (aref corpus index)
+         (multiple-value-bind (classification score)
+             (classify (start-of-file file *max-chars*))
+           (list
+            :file file
+            :type type
+            :classification classification
+            :score score)))))
+
+
+;;;; Utility functions
+(defun nshuffle-vector (vector)
+  "Shuffle a vector using the Fisher-Yates algorithm. Destructive."
+  (loop for index downfrom (1- (length vector)) to 1
+     for other = (random (1+ index))
+     do (unless (= index other)
+          (rotatef (aref vector index) (aref vector other))))
+  vector)
+
+(defun shuffle-vector (vector)
+  "Shuffle vector using the Fisher-Yates algorithm. Non-destructive"
+  (nshuffle-vector (copy-seq vector)))
+
+(defun start-of-file (file max-chars)
+  "Read and return a substring with first max-chars of a file"
+  (with-open-file (in file)
+    (let* ((length (min (file-length in) max-chars))
+           (text (make-string length))
+           (read (read-sequence text in)))
+      (if (< read length)
+          (subseq text 0 read)
+          text))))
+
+
+;;;; Analyzing Results
+(defun result-type (result)
+  (destructuring-bind (&key type classification &allow-other-keys) result
+    (ecase type
+      (ham
+       (ecase classification
+         (ham 'correct)
+         (spam 'false-positive)
+         (unsure 'missed-ham)))
+      (spam
+       (ecase classification
+         (ham 'false-negative)
+         (spam 'correct)
+         (unsure 'missed-spam))))))
+
+;;; Predicates for each type of result
+(defun false-positive-p (result)
+  (eql (result-type result) 'false-positive))
+
+(defun false-negative-p (result)
+  (eql (result-type result) 'false-negative))
+
+(defun missed-ham-p (result)
+  (eql (result-type result) 'missed-ham))
+
+(defun missed-spam-p (result)
+  (eql (result-type result) 'missed-spam))
+
+(defun correct-p (result)
+  (eql (result-type result) 'correct))
+
+;;; Print out the result summary
+(defun analyze-results (results)
+  (let* ((keys '(total correct false-positive
+                 false-negative missed-ham missed-spam))
+         (counts (loop for x in keys collect (cons x 0))))
+    (dolist (item results)
+      (incf (cdr (assoc 'total counts)))
+      (incf (cdr (assoc (result-type item) counts))))
+    (loop with total = (cdr (assoc 'total counts))
+       for (label . count) in counts
+       do (format t "~&~@(~a~):~20t~5d~,5t: ~6,2f%~%"
+                  label count (* 100 (/ count total))))))
+
+;;; Analyze why a message was classified the way it was
+(defun explain-classification (file)
+  (let* ((text (start-of-file file *max-chars*))
+         (features (extract-features text))
+         (score (score features))
+         (classification (classification score)))
+    (show-summary file text classification score)
+    (dolist (feature (sorted-interesting features))
+      (show-feature feature))))
+
+(defun show-summary (file text classification score)
+  (format t "~&~a" file)
+  (format t "~2%~a~2%" text)
+  (format t "Classified as ~a with score of ~,5f~%" classification score))
+
+(defun show-feature (feature)
+  (with-slots (word ham-count spam-count) feature
+    (format
+     t "~&~2t~a~30thams: ~5d; spams: ~5d;~,10tprob: ~,f~%"
+     word ham-count spam-count (bayesian-spam-probability feature))))
+
+(defun sorted-interesting (features)
+  (sort (remove-if #'untrained-p features) #'< :key #'bayesian-spam-probability))
