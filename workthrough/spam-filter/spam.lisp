@@ -155,7 +155,7 @@
 (defun fisher (probs number-of-probs)
   "The fisher computation described by Robinson."
   (inverse-chi-square
-   (* 2 (reduce #'+ probs :key #'log))
+   (* -2 (reduce #'+ probs :key #'log))
    (* 2 number-of-probs)))
 
 (defun inverse-chi-square (value degree-of-freedom)
@@ -169,12 +169,21 @@
 
 
 ;;;; Testing the filter
-(defun add-file-to-corpus (filename type corpus)
-  "Add a file to the corpus of messages of known types"
-  (vector-push-extend (list filename type) corpus))
+(defparameter *max-chars* (* 10 1024)
+  "Maximum number of characters to read from a message")
 
 (defparameter *corpus* (make-array 1000 :adjustable t :fill-pointer 0)
   "Vector with a fill pointer to hold corpus of messages")
+
+(defun clear-corpus ()
+  (setf *corpus* (make-array 1000 :adjustable t :fill-pointer 0)))
+
+(defun add-file-to-corpus (filename type corpus)
+  "Add a file to the corpus of messages of known types"
+  (handler-case (progn
+                  (start-of-file filename *max-chars*)
+                  (vector-push-extend (list filename type) corpus))
+    (error () (format t "Error reading ~s. Skipping...~%" filename))))
 
 (defun add-directory-to-corpus (dir type corpus)
   "Add all files in a directory in a folder as the same type"
@@ -191,9 +200,6 @@
     (train-from-corpus shuffled :start 0 :end train-on)
     (test-from-corpus shuffled :start train-on)))
 
-
-(defparameter *max-chars* (* 10 1024)
-  "Maximum number of characters to read from a message")
 
 (defun train-from-corpus (corpus &key (start 0) end)
   "Loop over a subsequence of the corpus and use messages in it to train the classifier"
